@@ -1,0 +1,180 @@
+<?php
+require('sdk/include/carrot.orders.php');
+date_default_timezone_set('PRC');
+$order = new CarrotOrders();
+
+$host="192.168.1.220";			//mysql数据库服务器
+$userName="root";				//mysql数据库用户名
+$passwrod="Lxtx123!@#";			//mysql数据库密码
+
+//$host="rm-bp10913qhycd944jn.mysql.rds.aliyuncs.com";			//mysql数据库服务器
+//$userName="longxing";				//mysql数据库用户名
+//$passwrod="L0ngx!ng123!@#";			//mysql数据库密码
+
+$database = "longxing";			//mysql数据库名
+
+$connection=mysql_connect("$host","$userName","$passwrod");
+mysql_query("set names 'utf8'");//编码转化
+if (!$connection) {
+    die("could not connect to the database.\n" . mysql_error());//诊断连接错误
+}
+$selectedDb = mysql_select_db($database);//选择数据库
+
+if (!$selectedDb) {
+    die("could not to the database\n" . mysql_error());
+}
+
+
+//查询前天以前所有没有开奖的活动
+//$time = strtotime(date('Y-m-d',time()-24*60*60*2)); //前天0时时间戳
+$time = strtotime(date('Y-m-d H:i:s',time())); //0时时间戳
+
+$lottery_no = "select * from lys_activity where winning_time <$time and (winning_code is null or winning_code = '')";
+
+$result_lottery_no = mysql_query($lottery_no);//执行查询
+
+while($row_lottery_on = mysql_fetch_assoc($result_lottery_no)){
+		
+		$activity_id = $row_lottery_on['id'];
+		$product_id = $row_lottery_on['product_id'];
+		$is_robot = $row_lottery_on['is_robot'];
+		
+		if($is_robot == 1){
+			doRobotLottery($activity_id,$product_id,$order);
+		} else{
+			doLottery($activity_id,$product_id,$order);
+		}
+}
+
+//执行机器人中奖
+function doRobotLottery($activity_id,$product_id,$order){
+	$activity_id = mysql_real_escape_string($activity_id);//防止SQL注入
+	$query = "select * from lys_activity where id = '$activity_id'";//构建查询语句
+
+	$result = mysql_query($query);//执行查询是否有该活动
+	if(!$result){
+		die("could not to the database\n" . mysql_error());
+	}
+	while ($row = mysql_fetch_assoc($result)){
+		$query_user_robot = "select * from lys_draw where is_robot = 1 and activity_id = '$activity_id'"; //获取抽该活动的机器人用户数据
+		$result_user_robot = mysql_query($query_user_robot);//执行查询
+		$array_user_robot = array();
+		while ($row_robot = mysql_fetch_assoc($result_user_robot)) {	//将该活动下的机器人用户数据组合成一个二维数组
+				$array_user_robot[] = $row_robot;
+		}
+		
+		if(!$array_user_robot){
+			doLottery($activity_id,$product_id,$order);	//如果没有机器人用户则执行用户中奖流程
+		}else{
+			
+			$array_key = array_rand($array_user_robot,1);			//随机获取一个数组下标
+			$winning_robot_data = $array_user_robot[$array_key];	//获取中奖机器人数据
+			$draw_number = $winning_robot_data['draw_number'];      //机器人该期下的抽奖码
+			$u_id = $winning_robot_data['u_id'];
+
+			$winning_code = substr($draw_number,1,8);				//获得中奖码
+			
+			//获取中奖人id
+			$u_id = $winning_robot_data["u_id"];
+			//print_r($row);die;
+			//保存中奖码和中奖人id
+			$query_update_activity = "update lys_activity set winning_code = '$winning_code', u_id = '$u_id' where id = '$activity_id'";
+			$return = mysql_query($query_update_activity);
+			
+			if ($return){
+				$data = array(
+					'user_id' => $u_id,  //用户ID
+					'caption' => '0元购第'.$activity_id.'期中奖商品',  //订单标题
+					'product' => $product_id,  //商品ID
+					'price' => $row['market_price']*100,//商品市场价
+					'memo' => '',  //订单备注内容(可选)
+					'type' => 0,  //0:普通订单 1:自动发货卡密类(可选，默认0)
+					'card_type' => 0  //卡类类型ID，如果type为1必须提供此参数
+				);
+				
+				order_add($data,$order);
+			}
+
+		}
+	}
+}
+
+//执行用户中奖
+function doLottery($activity_id,$product_id,$order){
+	$activity_id = mysql_real_escape_string($activity_id);//防止SQL注入
+	$query = "select * from lys_activity where id = '$activity_id'";//构建查询语句
+	$result = mysql_query($query);//执行查询
+	
+	if(!$result){
+		die("could not to the database\n" . mysql_error());
+	}
+	while ($row = mysql_fetch_assoc($result)) {
+		
+		//获取当前活动抽奖码
+		$now_code = $row["now_code"];
+		
+		//生成中奖码
+		$winning_code = rand(1, $now_code);
+
+		//自动补全0
+		$bit = 8;
+		$num_len = strlen($winning_code);  //计算编码长度strlen()
+		$zero = "";
+		for ($i = $num_len; $i<$bit; $i++) {
+			$zero .= "0";
+		}
+		$winning_code = $zero.$winning_code;
+
+		$robot_join = $row["robot_join"];
+		
+		if($robot_join == 1){
+			$query = "select * from lys_draw where draw_number like '%".$winning_code."%' and activity_id = '$activity_id'";//构建查询语句
+		} else {
+			//获取中奖人信息
+			$query = "select * from lys_draw where draw_number like '%".$winning_code."%' and activity_id = '$activity_id' and is_robot != 1";//构建查询语句
+		}
+		
+		$result_data = mysql_query($query);//执行查询
+		
+		if(!$result_data){
+			die("没有该中奖用户信息" . mysql_error());
+		}
+		while ($row_data = mysql_fetch_assoc($result_data)) {
+			//获取中奖人id
+			$u_id = $row_data["u_id"];
+		
+			//保存中奖码和中奖人id
+			$query = "update lys_activity set winning_code = '$winning_code', u_id = '$u_id' where id = '$activity_id'";
+			$return = mysql_query($query);
+
+			if ($return){
+				$data = array(
+					'user_id' => $u_id,  //用户ID
+					'caption' => '0元购第'.$activity_id.'期中奖商品',  //订单标题
+					'product' => $product_id,  //商品ID
+					'price' => $row['market_price']*100,//商品市场价
+					'memo' => '',  //订单备注内容(可选)
+					'type' => 0,  //0:普通订单 1:自动发货卡密类(可选，默认0)
+					'card_type' => 0  //卡类类型ID，如果type为1必须提供此参数
+				);
+				
+				order_add($data, $order);
+			}
+		}
+	}
+}
+
+//生成订单
+function order_add($data,$order){
+	$result_order = $order->create($data);
+	print_r($result_order);
+
+	////修改活动状态
+	//if ($result_order){
+	//	$query_update = "update lys_activity set property = 1 where id = '$activity_id'";
+	//	$return = mysql_query($query_update);
+	//	echo $return;
+	//}
+
+}
+
